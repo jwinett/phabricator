@@ -31,14 +31,16 @@ final class HarbormasterUnitMessageListController
 
     $unit_data = array();
     if ($target_phids) {
-      $unit_data = id(new HarbormasterBuildUnitMessage())->loadAllWhere(
-        'buildTargetPHID IN (%Ls)',
-        $target_phids);
+      $unit_data = id(new HarbormasterBuildUnitMessageQuery())
+        ->setViewer($viewer)
+        ->withBuildTargetPHIDs($target_phids)
+        ->execute();
     } else {
       $unit_data = array();
     }
 
     $unit = id(new HarbormasterUnitSummaryView())
+      ->setViewer($viewer)
       ->setBuildable($buildable)
       ->setUnitMessages($unit_data);
 

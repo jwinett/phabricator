@@ -19,6 +19,7 @@ final class PhabricatorRepositoryPushEvent
   protected $writeWait;
   protected $readWait;
   protected $hostWait;
+  protected $hookWait;
 
   private $repository = self::ATTACHABLE;
   private $logs = self::ATTACHABLE;
@@ -41,6 +42,7 @@ final class PhabricatorRepositoryPushEvent
         'writeWait' => 'uint64?',
         'readWait' => 'uint64?',
         'hostWait' => 'uint64?',
+        'hookWait' => 'uint64?',
       ),
       self::CONFIG_KEY_SCHEMA => array(
         'key_repository' => array(
@@ -48,6 +50,9 @@ final class PhabricatorRepositoryPushEvent
         ),
         'key_identifier' => array(
           'columns' => array('requestIdentifier'),
+        ),
+        'key_reject' => array(
+          'columns' => array('rejectCode', 'rejectDetails'),
         ),
       ),
     ) + parent::getConfiguration();

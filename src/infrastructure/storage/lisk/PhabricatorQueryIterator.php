@@ -25,11 +25,13 @@ final class PhabricatorQueryIterator extends PhutilBufferedIterator {
     $pager = clone $this->pager;
     $query = clone $this->query;
 
+    $query->setDisableOverheating(true);
+
     $results = $query->executeWithCursorPager($pager);
 
     // If we got less than a full page of results, this was the last set of
     // results. Throw away the pager so we end iteration.
-    if (count($results) < $pager->getPageSize()) {
+    if (!$pager->getHasMoreResults()) {
       $this->pager = null;
     } else {
       $this->pager->setAfterID($pager->getNextPageID());

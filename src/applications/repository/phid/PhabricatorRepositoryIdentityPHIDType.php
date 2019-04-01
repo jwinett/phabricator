@@ -28,6 +28,21 @@ final class PhabricatorRepositoryIdentityPHIDType
   public function loadHandles(
     PhabricatorHandleQuery $query,
     array $handles,
-    array $objects) {}
+    array $objects) {
+
+    $avatar_uri = celerity_get_resource_uri('/rsrc/image/avatar.png');
+    foreach ($handles as $phid => $handle) {
+      $identity = $objects[$phid];
+
+      $id = $identity->getID();
+      $name = $identity->getIdentityNameRaw();
+
+      $handle->setObjectName(pht('Identity %d', $id));
+      $handle->setName($name);
+      $handle->setURI($identity->getURI());
+      $handle->setIcon('fa-user');
+      $handle->setImageURI($avatar_uri);
+    }
+  }
 
 }

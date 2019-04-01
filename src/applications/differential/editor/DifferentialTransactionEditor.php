@@ -247,35 +247,16 @@ final class DifferentialTransactionEditor
         case DifferentialTransaction::TYPE_INLINE:
           $this->didExpandInlineState = true;
 
-          $actor_phid = $this->getActingAsPHID();
-          $actor_is_author = ($object->getAuthorPHID() == $actor_phid);
-          if (!$actor_is_author) {
-            break;
+          $query_template = id(new DifferentialDiffInlineCommentQuery())
+            ->withRevisionPHIDs(array($object->getPHID()));
+
+          $state_xaction = $this->newInlineStateTransaction(
+            $object,
+            $query_template);
+
+          if ($state_xaction) {
+            $results[] = $state_xaction;
           }
-
-          $state_map = PhabricatorTransactions::getInlineStateMap();
-
-          $inlines = id(new DifferentialDiffInlineCommentQuery())
-            ->setViewer($this->getActor())
-            ->withRevisionPHIDs(array($object->getPHID()))
-            ->withFixedStates(array_keys($state_map))
-            ->execute();
-
-          if (!$inlines) {
-            break;
-          }
-
-          $old_value = mpull($inlines, 'getFixedState', 'getPHID');
-          $new_value = array();
-          foreach ($old_value as $key => $state) {
-            $new_value[$key] = $state_map[$state];
-          }
-
-          $results[] = id(new DifferentialTransaction())
-            ->setTransactionType(PhabricatorTransactions::TYPE_INLINESTATE)
-            ->setIgnoreOnNoEffect(true)
-            ->setOldValue($old_value)
-            ->setNewValue($new_value);
           break;
       }
     }
@@ -436,6 +417,11 @@ final class DifferentialTransactionEditor
       // conditions for acceptance. This usually happens after an accepting
       // reviewer resigns or is removed.
       $new_status = DifferentialRevisionStatus::NEEDS_REVIEW;
+    } else if ($was_revision) {
+      // This revision was "Needs Revision", but no longer has any rejecting
+      // reviewers. This usually happens after the last rejecting reviewer
+      // resigns or is removed. Put the revision back in "Needs Review".
+      $new_status = DifferentialRevisionStatus::NEEDS_REVIEW;
     }
 
     if ($new_status === null) {
@@ -577,7 +563,7 @@ final class DifferentialTransactionEditor
   }
 
   protected function getMailSubjectPrefix() {
-    return PhabricatorEnv::getEnvConfig('metamta.differential.subject-prefix');
+    return pht('[Differential]');
   }
 
   protected function getMailThreadID(PhabricatorLiskDAO $object) {
@@ -592,12 +578,13 @@ final class DifferentialTransactionEditor
   }
 
   protected function buildMailTemplate(PhabricatorLiskDAO $object) {
-    $id = $object->getID();
+    $monogram = $object->getMonogram();
     $title = $object->getTitle();
-    $subject = "D{$id}: {$title}";
 
     return id(new PhabricatorMetaMTAMail())
-      ->setSubject($subject);
+      ->setSubject(pht('%s: %s', $monogram, $title))
+      ->setMustEncryptSubject(pht('%s: Revision Updated', $monogram))
+      ->setMustEncryptURI($object->getURI());
   }
 
   protected function getTransactionsForMail(
@@ -620,10 +607,12 @@ final class DifferentialTransactionEditor
 
     $viewer = $this->requireActor();
 
-    $body = new PhabricatorMetaMTAMailBody();
-    $body->setViewer($this->requireActor());
+    $body = id(new PhabricatorMetaMTAMailBody())
+      ->setViewer($viewer);
 
-    $revision_uri = PhabricatorEnv::getProductionURI('/D'.$object->getID());
+    $revision_uri = $object->getURI();
+    $revision_uri = PhabricatorEnv::getProductionURI($revision_uri);
+    $new_uri = $revision_uri.'/new/';
 
     $this->addHeadersAndCommentsToMailBody(
       $body,
@@ -644,19 +633,6 @@ final class DifferentialTransactionEditor
       $this->appendInlineCommentsForMail($object, $inlines, $body);
     }
 
-    $changed_uri = $this->getChangedPriorToCommitURI();
-    if ($changed_uri) {
-      $body->addLinkSection(
-        pht('CHANGED PRIOR TO COMMIT'),
-        $changed_uri);
-    }
-
-    $this->addCustomFieldsToMailBody($body, $object, $xactions);
-
-    $body->addLinkSection(
-      pht('REVISION DETAIL'),
-      $revision_uri);
-
     $update_xaction = null;
     foreach ($xactions as $xaction) {
       switch ($xaction->getTransactionType()) {
@@ -668,7 +644,28 @@ final class DifferentialTransactionEditor
 
     if ($update_xaction) {
       $diff = $this->requireDiff($update_xaction->getNewValue(), true);
+    } else {
+      $diff = null;
+    }
 
+    $changed_uri = $this->getChangedPriorToCommitURI();
+    if ($changed_uri) {
+      $body->addLinkSection(
+        pht('CHANGED PRIOR TO COMMIT'),
+        $changed_uri);
+    }
+
+    $this->addCustomFieldsToMailBody($body, $object, $xactions);
+
+    if (!$this->isFirstBroadcast()) {
+      $body->addLinkSection(pht('CHANGES SINCE LAST ACTION'), $new_uri);
+    }
+
+    $body->addLinkSection(
+      pht('REVISION DETAIL'),
+      $revision_uri);
+
+    if ($update_xaction) {
       $body->addTextSection(
         pht('AFFECTED FILES'),
         $this->renderAffectedFilesForMail($diff));
@@ -718,7 +715,7 @@ final class DifferentialTransactionEditor
             $name = pht('D%s.%s.patch', $object->getID(), $diff->getID());
             $mime_type = 'text/x-patch; charset=utf-8';
             $body->addAttachment(
-              new PhabricatorMetaMTAAttachment($patch, $name, $mime_type));
+              new PhabricatorMailAttachment($patch, $name, $mime_type));
           }
         }
       }
@@ -881,6 +878,17 @@ final class DifferentialTransactionEditor
     array $inlines,
     PhabricatorMetaMTAMailBody $body) {
 
+    $limit = 100;
+    $limit_note = null;
+    if (count($inlines) > $limit) {
+      $limit_note = pht(
+        '(Showing first %s of %s inline comments.)',
+        new PhutilNumber($limit),
+        phutil_count($inlines));
+
+      $inlines = array_slice($inlines, 0, $limit, true);
+    }
+
     $section = id(new DifferentialInlineCommentMailView())
       ->setViewer($this->getActor())
       ->setInlines($inlines)
@@ -889,6 +897,9 @@ final class DifferentialTransactionEditor
     $header = pht('INLINE COMMENTS');
 
     $section_text = "\n".$section->getPlaintext();
+    if ($limit_note) {
+      $section_text = $limit_note."\n".$section_text;
+    }
 
     $style = array(
       'margin: 6px 0 12px 0;',
@@ -900,6 +911,16 @@ final class DifferentialTransactionEditor
         'style' => implode(' ', $style),
       ),
       $section->getHTML());
+
+    if ($limit_note) {
+      $section_html = array(
+        phutil_tag(
+          'em',
+          array(),
+          $limit_note),
+        $section_html,
+      );
+    }
 
     $body->addPlaintextSection($header, $section_text, false);
     $body->addHTMLSection($header, $section_html);
@@ -1312,9 +1333,9 @@ final class DifferentialTransactionEditor
     foreach (array_chunk($sql, 256) as $chunk) {
       queryfx(
         $conn_w,
-        'INSERT INTO %T (repositoryID, pathID, epoch, revisionID) VALUES %Q',
+        'INSERT INTO %T (repositoryID, pathID, epoch, revisionID) VALUES %LQ',
         $table->getTableName(),
-        implode(', ', $chunk));
+        $chunk);
     }
   }
 
@@ -1389,9 +1410,9 @@ final class DifferentialTransactionEditor
     if ($sql) {
       queryfx(
         $conn_w,
-        'INSERT INTO %T (revisionID, type, hash) VALUES %Q',
+        'INSERT INTO %T (revisionID, type, hash) VALUES %LQ',
         ArcanistDifferentialRevisionHash::TABLE_NAME,
-        implode(', ', $sql));
+        $sql);
     }
   }
 

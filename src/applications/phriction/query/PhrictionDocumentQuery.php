@@ -151,35 +151,53 @@ final class PhrictionDocumentQuery
       $contents = id(new PhrictionContentQuery())
         ->setViewer($this->getViewer())
         ->setParentQuery($this)
-        ->withIDs(mpull($documents, 'getContentID'))
+        ->withPHIDs(mpull($documents, 'getContentPHID'))
         ->execute();
-      $contents = mpull($contents, null, 'getID');
+      $contents = mpull($contents, null, 'getPHID');
 
       foreach ($documents as $key => $document) {
-        $content_id = $document->getContentID();
-        if (empty($contents[$content_id])) {
+        $content_phid = $document->getContentPHID();
+        if (empty($contents[$content_phid])) {
           unset($documents[$key]);
           continue;
         }
-        $document->attachContent($contents[$content_id]);
+        $document->attachContent($contents[$content_phid]);
       }
     }
 
     return $documents;
   }
 
+  protected function buildSelectClauseParts(AphrontDatabaseConnection $conn) {
+    $select = parent::buildSelectClauseParts($conn);
+
+    if ($this->shouldJoinContentTable()) {
+      $select[] = qsprintf($conn, 'c.title');
+    }
+
+    return $select;
+  }
+
   protected function buildJoinClauseParts(AphrontDatabaseConnection $conn) {
     $joins = parent::buildJoinClauseParts($conn);
 
-    if ($this->getOrderVector()->containsKey('updated')) {
+    if ($this->shouldJoinContentTable()) {
       $content_dao = new PhrictionContent();
       $joins[] = qsprintf(
         $conn,
-        'JOIN %T c ON d.contentID = c.id',
+        'JOIN %T c ON d.contentPHID = c.phid',
         $content_dao->getTableName());
     }
 
     return $joins;
+  }
+
+  private function shouldJoinContentTable() {
+    if ($this->getOrderVector()->containsKey('title')) {
+      return true;
+    }
+
+    return false;
   }
 
   protected function buildWhereClauseParts(AphrontDatabaseConnection $conn) {
@@ -309,10 +327,14 @@ final class PhrictionDocumentQuery
             $max);
         }
 
-        $path_clauses[] = '('.implode(') AND (', $parts).')';
+        if ($parts) {
+          $path_clauses[] = qsprintf($conn, '%LA', $parts);
+        }
       }
 
-      $where[] = '('.implode(') OR (', $path_clauses).')';
+      if ($path_clauses) {
+        $where[] = qsprintf($conn, '%LO', $path_clauses);
+      }
     }
 
     return $where;
@@ -321,7 +343,7 @@ final class PhrictionDocumentQuery
   public function getBuiltinOrders() {
     return parent::getBuiltinOrders() + array(
       self::ORDER_HIERARCHY => array(
-        'vector' => array('depth', 'title', 'updated'),
+        'vector' => array('depth', 'title', 'updated', 'id'),
         'name' => pht('Hierarchy'),
       ),
     );
@@ -343,40 +365,30 @@ final class PhrictionDocumentQuery
       ),
       'updated' => array(
         'table' => 'd',
-        'column' => 'contentID',
+        'column' => 'editedEpoch',
         'type' => 'int',
-        'unique' => true,
+        'unique' => false,
       ),
     );
   }
 
-  protected function getPagingValueMap($cursor, array $keys) {
-    $document = $this->loadCursorObject($cursor);
+  protected function newPagingMapFromCursorObject(
+    PhabricatorQueryCursor $cursor,
+    array $keys) {
+
+    $document = $cursor->getObject();
 
     $map = array(
-      'id' => $document->getID(),
+      'id' => (int)$document->getID(),
       'depth' => $document->getDepth(),
-      'updated' => $document->getContentID(),
+      'updated' => (int)$document->getEditedEpoch(),
     );
 
-    foreach ($keys as $key) {
-      switch ($key) {
-        case 'title':
-          $map[$key] = $document->getContent()->getTitle();
-          break;
-      }
+    if (isset($keys['title'])) {
+      $map['title'] = $cursor->getRawRowProperty('title');
     }
 
     return $map;
-  }
-
-  protected function willExecuteCursorQuery(
-    PhabricatorCursorPagedPolicyAwareQuery $query) {
-    $vector = $this->getOrderVector();
-
-    if ($vector->containsKey('title')) {
-      $query->needContent(true);
-    }
   }
 
   protected function getPrimaryTableAlias() {

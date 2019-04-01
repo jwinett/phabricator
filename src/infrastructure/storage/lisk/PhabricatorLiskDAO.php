@@ -6,6 +6,7 @@
 abstract class PhabricatorLiskDAO extends LiskDAO {
 
   private static $namespaceStack = array();
+  private $forcedNamespace;
 
   const ATTACHABLE = '<attachable>';
   const CONFIG_APPLICATION_SERIALIZERS = 'phabricator/serializers';
@@ -45,6 +46,11 @@ abstract class PhabricatorLiskDAO extends LiskDAO {
       throw new Exception(pht('No storage namespace configured!'));
     }
     return $namespace;
+  }
+
+  public function setForcedStorageNamespace($namespace) {
+    $this->forcedNamespace = $namespace;
+    return $this;
   }
 
   /**
@@ -104,6 +110,19 @@ abstract class PhabricatorLiskDAO extends LiskDAO {
       $connection = $replica->newApplicationConnection($database);
       $connection->setReadOnly(true);
       if ($replica->isReachable($connection)) {
+        if ($master_exception) {
+          // If we ended up here as the result of a failover, log the
+          // exception. This is seriously bad news even if we are able
+          // to recover from it.
+          $proxy_exception = new PhutilProxyException(
+            pht(
+              'Failed to connect to master database ("%s"), failing over '.
+              'into read-only mode.',
+              $database),
+            $master_exception);
+          phlog($proxy_exception);
+        }
+
         return $connection;
       }
     }
@@ -187,24 +206,26 @@ abstract class PhabricatorLiskDAO extends LiskDAO {
    */
   abstract public function getApplicationName();
 
-  protected function getConnectionNamespace() {
-    return self::getStorageNamespace().'_'.$this->getApplicationName();
-  }
+  protected function getDatabaseName() {
+    if ($this->forcedNamespace) {
+      $namespace = $this->forcedNamespace;
+    } else {
+      $namespace = self::getStorageNamespace();
+    }
 
+    return $namespace.'_'.$this->getApplicationName();
+  }
 
   /**
    * Break a list of escaped SQL statement fragments (e.g., VALUES lists for
    * INSERT, previously built with @{function:qsprintf}) into chunks which will
    * fit under the MySQL 'max_allowed_packet' limit.
    *
-   * Chunks are glued together with `$glue`, by default ", ".
-   *
    * If a statement is too large to fit within the limit, it is broken into
    * its own chunk (but might fail when the query executes).
    */
   public static function chunkSQL(
     array $fragments,
-    $glue = ', ',
     $limit = null) {
 
     if ($limit === null) {
@@ -217,9 +238,13 @@ abstract class PhabricatorLiskDAO extends LiskDAO {
 
     $chunk = array();
     $len = 0;
-    $glue_len = strlen($glue);
+    $glue_len = strlen(', ');
     foreach ($fragments as $fragment) {
-      $this_len = strlen($fragment);
+      if ($fragment instanceof PhutilQueryString) {
+        $this_len = strlen($fragment->getUnmaskedString());
+      } else {
+        $this_len = strlen($fragment);
+      }
 
       if ($chunk) {
         // Chunks after the first also imply glue.
@@ -233,17 +258,13 @@ abstract class PhabricatorLiskDAO extends LiskDAO {
         if ($chunk) {
           $result[] = $chunk;
         }
-        $len = strlen($fragment);
+        $len = ($this_len - $glue_len);
         $chunk = array($fragment);
       }
     }
 
     if ($chunk) {
       $result[] = $chunk;
-    }
-
-    foreach ($result as $key => $fragment_list) {
-      $result[$key] = implode($glue, $fragment_list);
     }
 
     return $result;

@@ -7,7 +7,11 @@ final class DifferentialBuildableEngine
     $object = $this->getObject();
 
     if ($object instanceof DifferentialDiff) {
-      return $object->getRevision();
+      if ($object->getRevisionID()) {
+        return $object->getRevision();
+      } else {
+        return null;
+      }
     }
 
     return $object;
@@ -52,6 +56,30 @@ final class DifferentialBuildableEngine
       ->setNewValue($new_status);
 
     $this->applyTransactions(array($xaction));
+  }
+
+  public function getAuthorIdentity() {
+    $object = $this->getObject();
+
+    if ($object instanceof DifferentialRevision) {
+      $object = $object->loadActiveDiff();
+    }
+
+    $authorship = $object->getDiffAuthorshipDict();
+    if (!isset($authorship['authorName'])) {
+      return null;
+    }
+
+    $name = $authorship['authorName'];
+    $address = idx($authorship, 'authorEmail');
+
+    $full = id(new PhutilEmailAddress())
+      ->setDisplayName($name)
+      ->setAddress($address);
+
+    return id(new PhabricatorRepositoryIdentity())
+      ->setIdentityName((string)$full)
+      ->makeEphemeral();
   }
 
 }
